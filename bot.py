@@ -3,11 +3,12 @@ import datetime
 import requests
 import json
 import logging
-from aiogram import Bot, Dispatcher, types
-from aiogram import Router
+import os
+from aiogram import Bot, Dispatcher, types, Router
 from aiogram.filters import Command
 from aiogram.types import FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton
 import folium
+from aiohttp import web
 
 logging.basicConfig(level=logging.INFO)
 
@@ -83,132 +84,67 @@ async def help(message: types.Message):
         "/region <название> — выбрать регион"
     )
 
-@router.message(Command("region"))
-async def set_region(message: types.Message):
-    args = message.text.split(maxsplit=1)
-    if len(args) > 1:
-        region = args[1]
-        user_region[str(message.from_user.id)] = region
-        save_json(REGIONS_FILE, user_region)
-        await message.answer(f"✅ Регион установлен: {region}")
-        await status(message)
-    else:
-        await message.answer("⚠️ Укажите регион, например: /region Киев")
+# ---------- ОБРАБОТКА КНОПОК ----------
+@router.callback_query(lambda c: c.data == "region")
+async def cb_region(callback: types.CallbackQuery):
+    await callback.message.answer("📍 Выберите регион командой /region <название>")
+    await callback.answer()
 
-@router.message(Command("status"))
-async def status(message: types.Message):
-    try:
-        url = "https://mapa.ua/api/v1/current"
-        data = requests.get(url).json()
-        if "alerts" in data and data["alerts"]:
-            region = user_region.get(str(message.from_user.id))
-            if region:
-                alerts = [a for a in data["alerts"] if a.get("region") == region]
-                if alerts:
-                    response_text = f"🚨 Тривога у {region}:\n"
-                    for alert in alerts:
-                        started = alert.get("started_at")
-                        if started:
-                            start_time = datetime.datetime.fromtimestamp(started).strftime("%H:%M")
-                            response_text += f"• Початок {start_time}\n"
-                    await message.answer(response_text)
-                else:
-                    await message.answer(f"✅ У {region} зараз тривог немає")
-            else:
-                response_text = "🚨 Активні тривоги:\n"
-                for alert in data["alerts"]:
-                    response_text += f"• {alert.get('region')}\n"
-                await message.answer(response_text)
-        else:
-            await message.answer("✅ Зараз тривог немає")
-    except Exception as e:
-        await message.answer("⚠️ Помилка при отриманні даних")
-        print(f"Помилка: {e}")
+@router.callback_query(lambda c: c.data == "map")
+async def cb_map(callback: types.CallbackQuery):
+    await map_command(callback.message)
+    await callback.answer()
 
-@router.message(Command("map"))
-async def map_command(message: types.Message):
-    m = folium.Map(location=[48.3794, 31.1656], zoom_start=6)
-    url = "https://mapa.ua/api/v1/current"
-    data = requests.get(url).json()
-    active_alerts = {alert.get("region") for alert in data.get("alerts", [])}
-    geojson_url = "https://raw.githubusercontent.com/deldersveld/topojson/master/countries/ukraine/ukraine-regions.json"
-    folium.GeoJson(
-        geojson_url,
-        style_function=lambda feature: {
-            "fillColor": "red" if feature["properties"]["name"] in active_alerts else "green",
-            "color": "black",
-            "weight": 1,
-            "fillOpacity": 0.5,
-        },
-        tooltip=folium.GeoJsonTooltip(fields=["name"], aliases=["Область"])
-    ).add_to(m)
-    m.save("map.html")
-    await message.answer_document(FSInputFile("map.html"))
+@router.callback_query(lambda c: c.data == "status")
+async def cb_status(callback: types.CallbackQuery):
+    await status(callback.message)
+    await callback.answer()
 
-@router.message(Command("history"))
-async def history(message: types.Message):
-    try:
-        url = "https://mapa.ua/api/v1/history"
-        data = requests.get(url).json()
-        region = user_region.get(str(message.from_user.id))
-        response_text = "📜 Останні тривоги:\n"
-        count = 0
-        for alert in data.get("alerts", []):
-            if not region or alert.get("region") == region:
-                started = alert.get("started_at")
-                ended = alert.get("ended_at")
-                start_time = datetime.datetime.fromtimestamp(started).strftime("%d.%m %H:%M") if started else "?"
-                end_time = datetime.datetime.fromtimestamp(ended).strftime("%H:%M") if ended else "?"
-                response_text += f"• {alert.get('region')} — {start_time} до {end_time}\n"
-                count += 1
-                if count >= 5:
-                    break
-        await message.answer(response_text)
-    except Exception as e:
-        await message.answer("⚠️ Помилка при отриманні історії")
-        print(f"Помилка: {e}")
+@router.callback_query(lambda c: c.data == "history")
+async def cb_history(callback: types.CallbackQuery):
+    await history(callback.message)
+    await callback.answer()
 
-@router.message(Command("stats"))
-async def stats(message: types.Message):
-    try:
-        url = "https://mapa.ua/api/v1/history"
-        data = requests.get(url).json()
-        region = user_region.get(str(message.from_user.id))
-        if not region:
-            await message.answer("⚠️ Сначала выберите регион командой /region <название>")
-            return
-        alerts = [a for a in data.get("alerts", []) if a.get("region") == region]
-        total = len(alerts)
-        durations = []
-        for alert in alerts:
-            if alert.get("started_at") and alert.get("ended_at"):
-                durations.append(alert.get("ended_at") - alert.get("started_at"))
-        avg_duration = sum(durations)/len(durations) if durations else 0
-        avg_minutes = int(avg_duration/60)
-        await message.answer(
-            f"📊 Статистика по {region}:\n"
-            f"• Всего тревог: {total}\n"
-            f"• Средняя длительность: {avg_minutes} мин"
-        )
-    except Exception as e:
-        await message.answer("⚠️ Ошибка при получении статистики")
-        print(f"Ошибка: {e}")
+@router.callback_query(lambda c: c.data == "stats")
+async def cb_stats(callback: types.CallbackQuery):
+    await stats(callback.message)
+    await callback.answer()
 
-@router.message(Command("alerts"))
-async def alerts(message: types.Message):
-    try:
-        url = "https://mapa.ua/api/v1/current"
-        data = requests.get(url).json()
-        if "alerts" in data and data["alerts"]:
-            response_text = "🚨 Активні тривоги по Україні:\n"
-            for alert in data["alerts"]:
-                response_text += f"• {alert.get('region')}\n"
-            await message.answer(response_text)
-        else:
-            await message.answer("✅ Зараз тривог немає по Україні")
-    except Exception as e:
-        await message.answer("⚠️ Помилка при отриманні даних")
-        print(f"Помилка: {e}")
+@router.callback_query(lambda c: c.data == "alerts")
+async def cb_alerts(callback: types.CallbackQuery):
+    await alerts(callback.message)
+    await callback.answer()
+
+@router.callback_query(lambda c: c.data == "help")
+async def cb_help(callback: types.CallbackQuery):
+    await help(callback.message)
+    await callback.answer()
+
+@router.callback_query(lambda c: c.data == "next")
+async def cb_next(callback: types.CallbackQuery):
+    await callback.message.answer("➡️ Второе меню:", reply_markup=second_menu())
+    await callback.answer()
+
+@router.callback_query(lambda c: c.data == "back")
+async def cb_back(callback: types.CallbackQuery):
+    await callback.message.answer("⬅️ Главное меню:", reply_markup=main_menu())
+    await callback.answer()
+
+@router.callback_query(lambda c: c.data == "settings")
+async def cb_settings(callback: types.CallbackQuery):
+    await callback.message.answer("⚙️ Настройки:", reply_markup=settings_menu())
+    await callback.answer()
+
+@router.callback_query(lambda c: c.data == "exit")
+async def cb_exit(callback: types.CallbackQuery):
+    await callback.message.answer("❌ Выход из меню")
+    await callback.answer()
+
+@router.callback_query(lambda c: c.data.startswith("lang_"))
+async def cb_lang(callback: types.CallbackQuery):
+    lang = callback.data.split("_")[1]
+    await callback.message.answer(f"✅ Язык установлен: {lang}")
+    await callback.answer()
 
 # ---------- МОНИТОРИНГ ----------
 async def monitor_alerts():
@@ -238,9 +174,8 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-import os
-from aiohttp import web
 
+# ---------- WEB ENDPOINT ДЛЯ RENDER ----------
 async def handle(request):
     return web.Response(text="Bot is running")
 
@@ -249,3 +184,4 @@ if __name__ == "__main__":
     app.router.add_get("/", handle)
     port = int(os.environ.get("PORT", 10000))
     web.run_app(app, host="0.0.0.0", port=port)
+
